@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>BB 스크리너</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
+  :root {
+    --bg:#0a0e1a;--bg2:#0f1628;--bg3:#161d35;--border:#1e2d50;
+    --accent:#2563eb;--accent2:#3b82f6;--green:#10b981;--red:#ef4444;
+    --yellow:#f59e0b;--orange:#f97316;--text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:'Noto Sans KR',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
+  body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(37,99,235,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(37,99,235,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0;}
+  .container{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:16px;}
+  .header{text-align:center;padding:24px 0 16px;}
+  .header-badge{display:inline-flex;align-items:center;gap:6px;background:rgba(37,99,235,0.12);border:1px solid rgba(37,99,235,0.3);border-radius:20px;padding:4px 14px;font-size:11px;color:var(--accent2);letter-spacing:.08em;margin-bottom:10px;font-family:'JetBrains Mono',monospace;}
+  .dot-live{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.5;transform:scale(.8);}}
+  .header h1{font-size:24px;font-weight:900;letter-spacing:-.5px;background:linear-gradient(135deg,#fff 0%,#93c5fd 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+  .header p{font-size:12px;color:var(--text3);margin-top:6px;}
+  .date-bar{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:16px;font-size:11px;color:var(--text3);font-family:'JetBrains Mono',monospace;}
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;}
+  .card-title{font-size:11px;font-weight:700;color:var(--text2);letter-spacing:.1em;text-transform:uppercase;margin-bottom:12px;display:flex;align-items:center;gap:8px;}
+  .card-title::before{content:'';width:3px;height:13px;background:var(--accent);border-radius:2px;}
+  .settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .setting-item{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 12px;}
+  .setting-label{font-size:10px;color:var(--text3);margin-bottom:3px;}
+  .setting-value{font-size:13px;font-weight:700;color:var(--accent2);font-family:'JetBrains Mono',monospace;}
+  .setting-sub{font-size:10px;color:var(--text3);margin-top:2px;}
+  .proximity-row{margin-top:10px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 12px;}
+  .proximity-row label{font-size:11px;color:var(--text2);display:block;margin-bottom:6px;}
+  .slider-row{display:flex;align-items:center;gap:8px;}
+  input[type=range]{flex:1;-webkit-appearance:none;height:4px;background:var(--border);border-radius:2px;outline:none;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--accent);cursor:pointer;}
+  .pval{font-size:13px;font-weight:700;color:var(--accent2);font-family:'JetBrains Mono',monospace;min-width:34px;text-align:right;}
+  .run-btn{width:100%;padding:15px;background:linear-gradient(135deg,#1d4ed8,#2563eb);border:none;border-radius:13px;color:#fff;font-size:15px;font-weight:700;font-family:'Noto Sans KR',sans-serif;cursor:pointer;margin-bottom:12px;box-shadow:0 4px 20px rgba(37,99,235,.3);transition:all .2s;}
+  .run-btn:active{transform:scale(.98);}
+  .run-btn:disabled{background:var(--bg3);color:var(--text3);box-shadow:none;cursor:not-allowed;}
+  .loading-box{display:none;background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:28px 20px;text-align:center;margin-bottom:12px;}
+  .spinner{width:34px;height:34px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 12px;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .loading-text{font-size:13px;color:var(--text2);}
+  .loading-step{font-size:11px;color:var(--text3);margin-top:6px;font-family:'JetBrains Mono',monospace;}
+  .error-box{display:none;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:13px;padding:14px 16px;margin-bottom:12px;font-size:13px;color:var(--red);line-height:1.6;}
+  .result-section{display:none;}
+  .summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;}
+  .sum-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:12px 8px;text-align:center;}
+  .sum-num{font-size:20px;font-weight:900;font-family:'JetBrains Mono',monospace;line-height:1;}
+  .sum-label{font-size:10px;color:var(--text3);margin-top:3px;line-height:1.3;}
+  .tabs{display:flex;gap:6px;margin-bottom:12px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;}
+  .tabs::-webkit-scrollbar{display:none;}
+  .tab-btn{flex-shrink:0;padding:7px 13px;border-radius:20px;border:1px solid var(--border);background:var(--bg2);color:var(--text3);font-size:12px;font-weight:600;cursor:pointer;font-family:'Noto Sans KR',sans-serif;transition:all .15s;}
+  .tab-btn.active{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .tab-content{display:none;}
+  .tab-content.active{display:block;}
+  .sec-header{display:flex;align-items:center;justify-content:space-between;margin:14px 0 8px;}
+  .sec-title{font-size:13px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px;}
+  .sec-badge{font-size:11px;padding:2px 8px;border-radius:10px;font-family:'JetBrains Mono',monospace;font-weight:700;}
+  .badge-red{background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3);}
+  .badge-yellow{background:rgba(245,158,11,.15);color:var(--yellow);border:1px solid rgba(245,158,11,.3);}
+  .badge-green{background:rgba(16,185,129,.15);color:var(--green);border:1px solid rgba(16,185,129,.3);}
+  .badge-orange{background:rgba(249,115,22,.15);color:var(--orange);border:1px solid rgba(249,115,22,.3);}
+  .badge-blue{background:rgba(37,99,235,.15);color:var(--accent2);border:1px solid rgba(37,99,235,.3);}
+  .table-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:13px;overflow:hidden;overflow-x:auto;}
+  table{width:100%;border-collapse:collapse;font-size:12px;}
+  thead th{background:var(--bg3);padding:9px 11px;text-align:left;font-size:10px;color:var(--text3);letter-spacing:.08em;font-weight:700;text-transform:uppercase;border-bottom:1px solid var(--border);}
+  tbody tr{border-bottom:1px solid rgba(30,45,80,.5);transition:background .15s;}
+  tbody tr:last-child{border-bottom:none;}
+  tbody tr:hover{background:rgba(37,99,235,.05);}
+  tbody td{padding:9px 11px;vertical-align:middle;}
+  .sname{font-weight:700;color:var(--text);font-size:13px;}
+  .scode{font-size:10px;color:var(--text3);font-family:'JetBrains Mono',monospace;margin-top:1px;}
+  .mtag{display:inline-block;font-size:9px;padding:1px 5px;border-radius:4px;margin-left:4px;font-weight:700;}
+  .tag-kospi{background:rgba(37,99,235,.2);color:var(--accent2);}
+  .tag-kosdaq{background:rgba(16,185,129,.2);color:var(--green);}
+  .pval{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:13px;}
+  .aval{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2);}
+  .ctag{display:inline-block;font-size:10px;padding:2px 7px;border-radius:6px;font-weight:700;white-space:nowrap;}
+  .c-bl{background:rgba(239,68,68,.15);color:var(--red);}
+  .c-nl{background:rgba(245,158,11,.15);color:var(--yellow);}
+  .c-bm{background:rgba(249,115,22,.15);color:var(--orange);}
+  .c-nm{background:rgba(59,130,246,.15);color:var(--accent2);}
+  .overlap-row{background:rgba(16,185,129,.05)!important;}
+  .overlap-row:hover{background:rgba(16,185,129,.1)!important;}
+  .divider{display:flex;align-items:center;gap:12px;margin:16px 0 10px;}
+  .divider-line{flex:1;height:1px;background:var(--border);}
+  .divider-label{font-size:11px;color:var(--text3);font-family:'JetBrains Mono',monospace;}
+  .empty{text-align:center;padding:18px;color:var(--text3);font-size:12px;}
+  .update-time{text-align:center;font-size:10px;color:var(--text3);font-family:'JetBrains Mono',monospace;margin-top:8px;padding-bottom:24px;}
+  @media(max-width:480px){.summary-grid{grid-template-columns:repeat(2,1fr);}thead th:nth-child(4),tbody td:nth-child(4){display:none;}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="header-badge"><span class="dot-live"></span>LIVE KRX DATA</div>
+    <h1>볼린저밴드 스크리너</h1>
+    <p>코스피/코스닥 거래대금 상위 100종목 · 실시간 KRX 데이터</p>
+  </div>
+  <div class="date-bar"><span id="todayDate"></span><span>·</span><span>장 마감 후 분석</span></div>
+
+  <div class="card">
+    <div class="card-title">볼린저밴드 설정</div>
+    <div class="settings-grid">
+      <div class="setting-item">
+        <div class="setting-label">기준 1 (BB1)</div>
+        <div class="setting-value">MA4 · SD×4</div>
+        <div class="setting-sub">일봉 시가 기준</div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-label">기준 2 (BB2)</div>
+        <div class="setting-value">MA20 · SD×2</div>
+        <div class="setting-sub">일봉 종가 기준</div>
+      </div>
+    </div>
+    <div class="proximity-row">
+      <label>근접 기준 범위 <span style="color:var(--text3)">(밴드 대비 %)</span></label>
+      <div class="slider-row">
+        <span style="font-size:11px;color:var(--text3)">1%</span>
+        <input type="range" id="proximityRange" min="1" max="10" value="3" step="0.5">
+        <span style="font-size:11px;color:var(--text3)">10%</span>
+        <span class="pval" id="proximityVal">3%</span>
+      </div>
+    </div>
+  </div>
+
+  <button class="run-btn" id="runBtn" onclick="runAnalysis()">🔍 지금 분석 시작</button>
+
+  <div class="loading-box" id="loadingBox">
+    <div class="spinner"></div>
+    <div class="loading-text">KRX 실시간 데이터 분석 중...</div>
+    <div class="loading-step" id="loadingStep">약 1~2분 소요됩니다</div>
+  </div>
+
+  <div class="error-box" id="errorBox"></div>
+
+  <div class="result-section" id="resultSection">
+    <div class="summary-grid" id="summaryGrid"></div>
+    <div class="tabs" id="tabsBar"></div>
+    <div id="tabContents"></div>
+    <div class="update-time" id="updateTime"></div>
+  </div>
+</div>
+
+<script>
+const today = new Date();
+const ds = `${today.getFullYear()}.${String(today.getMonth()+1).padStart(2,'0')}.${String(today.getDate()).padStart(2,'0')}`;
+document.getElementById('todayDate').textContent = ds;
+
+const slider = document.getElementById('proximityRange');
+const pValEl = document.getElementById('proximityVal');
+slider.addEventListener('input', () => { pValEl.textContent = slider.value + '%'; });
+
+async function runAnalysis() {
+  const btn = document.getElementById('runBtn');
+  const loadingBox = document.getElementById('loadingBox');
+  const resultSection = document.getElementById('resultSection');
+  const errorBox = document.getElementById('errorBox');
+  const proximity = parseFloat(slider.value);
+
+  btn.disabled = true;
+  btn.textContent = '분석 중...';
+  loadingBox.style.display = 'block';
+  resultSection.style.display = 'none';
+  errorBox.style.display = 'none';
+
+  try {
+    const res = await fetch(`/api/analyze?proximity=${proximity}`);
+    const json = await res.json();
+    if (json.status !== 'ok') throw new Error(json.message || '서버 오류');
+    renderResults(json.data);
+  } catch(e) {
+    errorBox.style.display = 'block';
+    errorBox.innerHTML = `⚠️ 오류가 발생했습니다.<br><span style="font-size:11px;color:var(--text3)">${e.message}</span>`;
+  } finally {
+    loadingBox.style.display = 'none';
+    btn.disabled = false;
+    btn.innerHTML = '🔄 다시 분석';
+  }
+}
+
+function renderResults(data) {
+  const s = data.summary;
+  document.getElementById('summaryGrid').innerHTML = `
+    <div class="sum-card"><div class="sum-num" style="color:var(--text)">${s.total_analyzed}</div><div class="sum-label">분석 종목</div></div>
+    <div class="sum-card"><div class="sum-num" style="color:var(--accent2)">${s.bb1_matched}</div><div class="sum-label">BB1 충족</div></div>
+    <div class="sum-card"><div class="sum-num" style="color:var(--green)">${s.bb2_matched}</div><div class="sum-label">BB2 충족</div></div>
+    <div class="sum-card"><div class="sum-num" style="color:var(--yellow)">${s.overlap_lower_count + s.overlap_mid_count}</div><div class="sum-label">겹치는 종목</div></div>
+  `;
+
+  const tabs = [
+    { id:'overlap', label:'⭐ 겹치는 종목', content: renderOverlap(data) },
+    { id:'bb1', label:'BB1 분석', content: renderBB(data.bb1) },
+    { id:'bb2', label:'BB2 분석', content: renderBB(data.bb2) },
+  ];
+
+  document.getElementById('tabsBar').innerHTML = tabs.map((t,i) =>
+    `<button class="tab-btn ${i===0?'active':''}" onclick="switchTab('${t.id}')" id="tab-${t.id}">${t.label}</button>`
+  ).join('');
+  document.getElementById('tabContents').innerHTML = tabs.map((t,i) =>
+    `<div class="tab-content ${i===0?'active':''}" id="content-${t.id}">${t.content}</div>`
+  ).join('');
+
+  document.getElementById('updateTime').textContent = `업데이트: ${new Date().toLocaleTimeString('ko-KR')} · 기준일 ${data.analysisDate}`;
+  document.getElementById('resultSection').style.display = 'block';
+}
+
+function switchTab(id) {
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+  document.getElementById('tab-'+id).classList.add('active');
+  document.getElementById('content-'+id).classList.add('active');
+}
+
+function renderOverlap(data) {
+  const lower = data.overlap_lower || [], mid = data.overlap_mid || [];
+  return `
+    <div class="sec-header"><div class="sec-title">BB 하한 기준 겹치는 종목</div><span class="sec-badge badge-green">${lower.length}개</span></div>
+    ${lower.length ? overlapTable(lower) : '<div class="empty">해당 종목 없음</div>'}
+    <div class="divider"><div class="divider-line"></div><div class="divider-label">BB 중간선 기준</div><div class="divider-line"></div></div>
+    <div class="sec-header"><div class="sec-title">BB 중간선 기준 겹치는 종목</div><span class="sec-badge badge-orange">${mid.length}개</span></div>
+    ${mid.length ? overlapTable(mid) : '<div class="empty">해당 종목 없음</div>'}
+  `;
+}
+
+function overlapTable(stocks) {
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>종목</th><th>현재가</th><th>거래대금</th><th>BB1</th><th>BB2</th></tr></thead>
+    <tbody>${stocks.map(s=>`<tr class="overlap-row">
+      <td><span style="color:var(--green);margin-right:3px">★</span><span class="sname">${s.name}</span><span class="mtag ${s.market==='KOSPI'?'tag-kospi':'tag-kosdaq'}">${s.market}</span><div class="scode">${s.code}</div></td>
+      <td><span class="pval">${Number(s.price).toLocaleString()}원</span></td>
+      <td><span class="aval">${s.amount}</span></td>
+      <td><span class="ctag ${condClass(s.bb1_condition)}">${s.bb1_condition}</span></td>
+      <td><span class="ctag ${condClass(s.bb2_condition)}">${s.bb2_condition}</span></td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function renderBB(bb) {
+  const cats = [
+    {key:'below_lower',label:'종가 < BB 하한선',badge:'badge-red'},
+    {key:'near_lower',label:'BB 하한 근접',badge:'badge-yellow'},
+    {key:'below_mid',label:'종가 < BB 중간선',badge:'badge-orange'},
+    {key:'near_mid',label:'BB 중간선 근접',badge:'badge-blue'},
+  ];
+  return cats.map(cat => {
+    const stocks = bb[cat.key] || [];
+    return `
+      <div class="sec-header"><div class="sec-title">${cat.label}</div><span class="sec-badge ${cat.badge}">${stocks.length}개</span></div>
+      ${stocks.length ? stockTable(stocks) : '<div class="empty">해당 종목 없음</div>'}
+    `;
+  }).join('');
+}
+
+function stockTable(stocks) {
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>종목</th><th>현재가</th><th>거래대금</th><th>BB하한</th><th>BB중간</th></tr></thead>
+    <tbody>${stocks.map(s=>`<tr>
+      <td><span class="sname">${s.name}</span><span class="mtag ${s.market==='KOSPI'?'tag-kospi':'tag-kosdaq'}">${s.market}</span><div class="scode">${s.code}</div></td>
+      <td><span class="pval">${Number(s.price).toLocaleString()}원</span></td>
+      <td><span class="aval">${s.amount}</span></td>
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--red)">${s.bb_lower?Number(s.bb_lower).toLocaleString():'-'}</td>
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2)">${s.bb_mid?Number(s.bb_mid).toLocaleString():'-'}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function condClass(c) {
+  if(!c) return '';
+  if(c.includes('이탈')) return 'c-bl';
+  if(c.includes('하한')&&c.includes('근접')) return 'c-nl';
+  if(c.includes('중간')&&c.includes('근접')) return 'c-nm';
+  if(c.includes('중간')||c.includes('하회')) return 'c-bm';
+  return 'c-nl';
+}
+</script>
+</body>
+</html>

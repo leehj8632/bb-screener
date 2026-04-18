@@ -103,6 +103,15 @@
   <div class="date-bar"><span id="todayDate"></span><span>·</span><span>장 마감 후 분석</span></div>
 
   <div class="card">
+    <div class="card-title">분석 기준일 설정</div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <input type="date" id="targetDate" style="flex:1;min-width:140px;padding:10px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;font-family:'JetBrains Mono',monospace;outline:none;">
+      <button onclick="setToday()" style="padding:10px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;color:var(--text2);font-size:12px;font-family:'Noto Sans KR',sans-serif;cursor:pointer;white-space:nowrap;">오늘로 초기화</button>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-top:8px;">※ 주말/공휴일은 직전 거래일 데이터로 자동 조정됩니다</div>
+  </div>
+
+  <div class="card">
     <div class="card-title">볼린저밴드 설정</div>
     <div class="settings-grid">
       <div class="setting-item">
@@ -150,6 +159,17 @@ const today = new Date();
 const ds = `${today.getFullYear()}.${String(today.getMonth()+1).padStart(2,'0')}.${String(today.getDate()).padStart(2,'0')}`;
 document.getElementById('todayDate').textContent = ds;
 
+// 날짜 입력 초기값 = 오늘
+function toInputFormat(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+document.getElementById('targetDate').value = toInputFormat(today);
+document.getElementById('targetDate').max = toInputFormat(today);
+
+function setToday() {
+  document.getElementById('targetDate').value = toInputFormat(new Date());
+}
+
 const slider = document.getElementById('proximityRange');
 const pValEl = document.getElementById('proximityVal');
 slider.addEventListener('input', () => { pValEl.textContent = slider.value + '%'; });
@@ -160,6 +180,7 @@ async function runAnalysis() {
   const resultSection = document.getElementById('resultSection');
   const errorBox = document.getElementById('errorBox');
   const proximity = parseFloat(slider.value);
+  const targetDate = document.getElementById('targetDate').value.replace(/-/g, '');
 
   btn.disabled = true;
   btn.textContent = '분석 중...';
@@ -168,7 +189,7 @@ async function runAnalysis() {
   errorBox.style.display = 'none';
 
   try {
-    const res = await fetch(`/api/analyze?proximity=${proximity}`);
+    const res = await fetch(`/api/analyze?proximity=${proximity}&date=${targetDate}`);
     const json = await res.json();
     if (json.status !== 'ok') throw new Error(json.message || '서버 오류');
     renderResults(json.data);

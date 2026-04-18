@@ -14,12 +14,20 @@ def get_prev_business_day(date: datetime) -> datetime:
     return date
 
 def get_top100_by_amount(market: str, date: str) -> list:
+    """거래대금 상위 100 종목 코드 반환 - pykrx 올바른 함수 사용"""
     try:
-        df = stock.get_market_trading_value_by_ticker(date, market=market)
-        logger.info(f"[{market}] 거래대금 조회: {len(df)}개, date={date}")
+        # 올바른 pykrx 함수: get_market_ohlcv_by_ticker
+        df = stock.get_market_ohlcv_by_ticker(date, market=market)
+        logger.info(f"[{market}] 종목 조회: {len(df)}개, 컬럼: {df.columns.tolist()}")
         if df.empty:
             return []
-        amount_col = "거래대금" if "거래대금" in df.columns else df.columns[2]
+        # 거래대금 컬럼 찾기
+        if "거래대금" in df.columns:
+            amount_col = "거래대금"
+        elif "거래량" in df.columns:
+            amount_col = "거래량"
+        else:
+            amount_col = df.columns[-1]
         df = df.sort_values(amount_col, ascending=False).head(100)
         return df.index.tolist()
     except Exception as e:

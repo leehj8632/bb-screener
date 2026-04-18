@@ -46,8 +46,14 @@ def classify_conditions(price, bb_lower, bb_mid, proximity_pct):
         conditions.append("중간선 근접")
     return conditions
 
-def run_screener(proximity: float = 3.0):
+def run_screener(proximity: float = 3.0, date_str_input: str = None):
     today = datetime.today()
+    if date_str_input:
+        try:
+            today = datetime.strptime(date_str_input, "%Y%m%d")
+        except:
+            pass
+
     # 주말이면 금요일로 조정
     if today.weekday() == 5:
         today -= timedelta(days=1)

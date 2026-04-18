@@ -22,9 +22,9 @@ def root():
     return FileResponse("static/index.html")
 
 @app.get("/api/analyze")
-def analyze(proximity: float = 3.0):
+def analyze(proximity: float = 3.0, date: str = None):
     try:
-        result = run_screener(proximity)
+        result = run_screener(proximity, date)
         return {"status": "ok", "data": result}
     except Exception as e:
         return {"status": "error", "message": str(e)}

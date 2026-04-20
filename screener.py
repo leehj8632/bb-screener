@@ -1,46 +1,130 @@
-from pykrx import stock
+import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import time
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+KRX_API_KEY = os.environ.get("KRX_API_KEY", "")
+KRX_BASE_URL = "http://data-dbg.krx.co.kr/svc/apis"
 
 def get_prev_business_day(date: datetime) -> datetime:
     while date.weekday() >= 5:
         date -= timedelta(days=1)
     return date
 
-def get_top100_by_amount(market: str, date: str) -> list:
-    """거래대금 상위 100 종목 코드 반환 - pykrx 올바른 함수 사용"""
+def krx_get(endpoint: str, params: dict) -> pd.DataFrame:
+    """KRX Open API 호출"""
+    headers = {"AUTH_KEY": KRX_API_KEY}
+    url = f"{KRX_BASE_URL}/{endpoint}"
     try:
-        # 올바른 pykrx 함수: get_market_ohlcv_by_ticker
-        df = stock.get_market_ohlcv_by_ticker(date, market=market)
-        logger.info(f"[{market}] 종목 조회: {len(df)}개, 컬럼: {df.columns.tolist()}")
-        if df.empty:
-            return []
-        # 거래대금 컬럼 찾기
-        if "거래대금" in df.columns:
-            amount_col = "거래대금"
-        elif "거래량" in df.columns:
-            amount_col = "거래량"
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        data = resp.json()
+        logger.info(f"KRX API 응답 키: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+        # OutBlock_1 키로 데이터 반환
+        if "OutBlock_1" in data:
+            return pd.DataFrame(data["OutBlock_1"])
         else:
-            amount_col = df.columns[-1]
-        df = df.sort_values(amount_col, ascending=False).head(100)
-        return df.index.tolist()
+            logger.warning(f"OutBlock_1 없음. 응답: {str(data)[:200]}")
+            return pd.DataFrame()
     except Exception as e:
-        logger.error(f"[{market}] get_top100 오류: {e}")
-        return []
-
-def get_ohlc(ticker: str, start: str, end: str) -> pd.DataFrame:
-    try:
-        df = stock.get_market_ohlcv_by_date(start, end, ticker)
-        return df
-    except Exception as e:
-        logger.error(f"[{ticker}] OHLC 오류: {e}")
+        logger.error(f"KRX API 오류 [{endpoint}]: {e}")
         return pd.DataFrame()
+
+def get_top100_by_amount(market: str, date: str) -> pd.DataFrame:
+    """
+    거래대금 상위 100 종목 반환
+    KRX API: stk/stk_dd_trd (주식 일별 거래 현황)
+    market: KOSPI -> STK, KOSDAQ -> KSQ
+    """
+    mkt_map = {"KOSPI": "STK", "KOSDAQ": "KSQ"}
+    mkt_id = mkt_map.get(market, "STK")
+
+    # 주식 일별 전종목 시세
+    df = krx_get("sto/stk_dd_trd", {"basDd": date, "mktId": mkt_id})
+
+    if df.empty:
+        # 대안 엔드포인트 시도
+        df = krx_get("sto/stk_bydd_trd", {"basDd": date, "mktId": mkt_id})
+
+    logger.info(f"[{market}] 전종목 시세 조회: {len(df)}개, 컬럼: {df.columns.tolist()[:8] if not df.empty else '없음'}")
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # 거래대금 컬럼 찾기 (TRAD_AMT, 거래대금 등)
+    amount_col = None
+    for col in ["TRAD_AMT", "ACC_TRDVAL", "거래대금", "TRDVAL"]:
+        if col in df.columns:
+            amount_col = col
+            break
+
+    if not amount_col:
+        logger.warning(f"거래대금 컬럼 없음. 컬럼 목록: {df.columns.tolist()}")
+        return pd.DataFrame()
+
+    # 종목코드 컬럼 찾기
+    code_col = None
+    for col in ["ISU_SRT_CD", "SHOTN_ISIN", "종목코드", "ISIN"]:
+        if col in df.columns:
+            code_col = col
+            break
+
+    # 종목명 컬럼 찾기
+    name_col = None
+    for col in ["ISU_ABBRV", "ISU_NM", "종목명"]:
+        if col in df.columns:
+            name_col = col
+            break
+
+    df[amount_col] = pd.to_numeric(df[amount_col].astype(str).str.replace(",", ""), errors="coerce").fillna(0)
+    df = df.sort_values(amount_col, ascending=False).head(100)
+
+    return df, code_col, name_col, amount_col
+
+def get_ohlc_history(ticker: str, start: str, end: str) -> pd.DataFrame:
+    """
+    종목 일별 OHLC 조회
+    KRX API: sto/stk_bydd_trd
+    """
+    df = krx_get("sto/stk_bydd_trd", {"isinCd": ticker, "strtDd": start, "endDd": end})
+
+    if df.empty:
+        return pd.DataFrame()
+
+    logger.debug(f"[{ticker}] OHLC 컬럼: {df.columns.tolist()}")
+
+    # 컬럼 매핑
+    col_map = {}
+    for target, candidates in [
+        ("날짜",   ["BAS_DD", "TRD_DD"]),
+        ("시가",   ["OPN_PRC", "OPNPRC"]),
+        ("고가",   ["HGH_PRC", "HGHPRC"]),
+        ("저가",   ["LOW_PRC", "LOWPRC"]),
+        ("종가",   ["CLS_PRC", "CLSPRC", "TDD_CLSPRC"]),
+        ("거래량", ["ACC_TRDVOL", "TRDVOL"]),
+        ("거래대금", ["ACC_TRDVAL", "TRAD_AMT", "TRDVAL"]),
+    ]:
+        for c in candidates:
+            if c in df.columns:
+                col_map[c] = target
+                break
+
+    df = df.rename(columns=col_map)
+
+    # 숫자 변환
+    for col in ["시가", "고가", "저가", "종가", "거래량", "거래대금"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", ""), errors="coerce")
+
+    if "날짜" in df.columns:
+        df = df.sort_values("날짜").reset_index(drop=True)
+
+    return df
 
 def calc_bb(series: pd.Series, period: int, multiplier: float):
     mid = series.rolling(window=period).mean()
@@ -68,12 +152,6 @@ def classify_conditions(price, bb_lower, bb_mid, proximity_pct):
         conditions.append("중간선 근접")
     return conditions
 
-def get_ticker_name(ticker: str) -> str:
-    try:
-        return stock.get_market_ticker_name(ticker)
-    except:
-        return ticker
-
 def run_screener(proximity: float = 3.0, date_str_input: str = None):
     today = datetime.today()
     if date_str_input and len(date_str_input) == 8:
@@ -86,7 +164,7 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
     date_str = today.strftime("%Y%m%d")
     start_str = (today - timedelta(days=90)).strftime("%Y%m%d")
 
-    logger.info(f"분석날짜: {date_str}, 시작일: {start_str}, 근접기준: {proximity}%")
+    logger.info(f"분석날짜: {date_str}, 근접기준: {proximity}%")
 
     result = {
         "analysisDate": today.strftime("%Y-%m-%d"),
@@ -98,12 +176,36 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
         "summary": {"total_analyzed": 0, "bb1_matched": 0, "bb2_matched": 0, "overlap_lower_count": 0, "overlap_mid_count": 0}
     }
 
-    all_tickers = []
+    all_tickers = []  # [(code, name, market, amount_str), ...]
+
     for market_name in ["KOSPI", "KOSDAQ"]:
-        tickers = get_top100_by_amount(market_name, date_str)
-        logger.info(f"[{market_name}] 수집: {len(tickers)}개")
-        for t in tickers:
-            all_tickers.append((t, market_name))
+        try:
+            ret = get_top100_by_amount(market_name, date_str)
+            if isinstance(ret, tuple):
+                df, code_col, name_col, amount_col = ret
+            else:
+                logger.warning(f"[{market_name}] 데이터 없음")
+                continue
+
+            if df.empty or not code_col:
+                logger.warning(f"[{market_name}] 종목 데이터 없음")
+                continue
+
+            for _, row in df.iterrows():
+                code = str(row[code_col]).zfill(6)
+                name = str(row[name_col]) if name_col else code
+                amount_raw = float(row[amount_col]) if amount_col else 0
+                if amount_raw >= 100000000:
+                    amount_str = f"{int(amount_raw) // 100000000:,}억"
+                elif amount_raw >= 10000:
+                    amount_str = f"{int(amount_raw) // 10000:,}만"
+                else:
+                    amount_str = "-"
+                all_tickers.append((code, name, market_name, amount_str))
+
+            logger.info(f"[{market_name}] 수집: {len([t for t in all_tickers if t[2]==market_name])}개")
+        except Exception as e:
+            logger.error(f"[{market_name}] 수집 오류: {e}")
         time.sleep(0.5)
 
     result["summary"]["total_analyzed"] = len(all_tickers)
@@ -113,29 +215,15 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
         logger.error("종목 목록 비어있음!")
         return result
 
-    bb1_results = {}
-    bb2_results = {}
-
-    for idx, (ticker, market) in enumerate(all_tickers):
+    for idx, (ticker, name, market, amount_str) in enumerate(all_tickers):
         try:
-            df = get_ohlc(ticker, start_str, date_str)
+            df = get_ohlc_history(ticker, start_str, date_str)
             if df is None or df.empty or len(df) < 4:
                 continue
+            if "종가" not in df.columns or "시가" not in df.columns:
+                continue
 
-            name = get_ticker_name(ticker)
             close_today = float(df["종가"].iloc[-1])
-
-            # 거래대금 - OHLC에서 직접 추출
-            try:
-                amount_raw = int(df["거래대금"].iloc[-1]) if "거래대금" in df.columns else 0
-                if amount_raw >= 100000000:
-                    amount_str = f"{amount_raw // 100000000:,}억"
-                elif amount_raw >= 10000:
-                    amount_str = f"{amount_raw // 10000:,}만"
-                else:
-                    amount_str = "-"
-            except:
-                amount_str = "-"
 
             # BB1: 시가 기준, MA4, SD×4
             open_series = df["시가"].dropna()
@@ -162,7 +250,6 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
                     matched_bb1 = True
                 if matched_bb1:
                     result["summary"]["bb1_matched"] += 1
-                    bb1_results[ticker] = bb1_conds
 
             # BB2: 종가 기준, MA20, SD×2
             close_series = df["종가"].dropna()
@@ -189,11 +276,10 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
                     matched_bb2 = True
                 if matched_bb2:
                     result["summary"]["bb2_matched"] += 1
-                    bb2_results[ticker] = bb2_conds
 
             if idx % 20 == 0:
                 logger.info(f"진행: {idx+1}/{len(all_tickers)}")
-            time.sleep(0.15)
+            time.sleep(0.1)
 
         except Exception as e:
             logger.error(f"[{ticker}] 오류: {e}")

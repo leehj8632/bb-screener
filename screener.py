@@ -16,151 +16,127 @@ BASE_URL   = "https://openapi.koreainvestment.com:9443"
 _token_cache = {"token": None, "expires": None}
 
 def get_access_token() -> str:
-    """OAuth 액세스 토큰 발급 (캐시)"""
     now = datetime.now()
     if _token_cache["token"] and _token_cache["expires"] and now < _token_cache["expires"]:
         return _token_cache["token"]
-
     url = f"{BASE_URL}/oauth2/tokenP"
-    body = {
-        "grant_type": "client_credentials",
-        "appkey": APP_KEY,
-        "appsecret": APP_SECRET
-    }
+    body = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
     resp = requests.post(url, json=body, timeout=10)
     data = resp.json()
-    logger.info(f"토큰 발급 응답: {list(data.keys())}")
     token = data.get("access_token", "")
     _token_cache["token"] = token
     _token_cache["expires"] = now + timedelta(hours=23)
+    logger.info("토큰 발급 완료")
     return token
 
 def kis_get(path: str, params: dict, tr_id: str) -> dict:
-    """한국투자증권 API GET 호출"""
     token = get_access_token()
     headers = {
         "authorization": f"Bearer {token}",
         "appkey": APP_KEY,
         "appsecret": APP_SECRET,
         "tr_id": tr_id,
-        "Content-Type": "application/json"
+        "custtype": "P",
+        "Content-Type": "application/json; charset=utf-8"
     }
     url = f"{BASE_URL}{path}"
     resp = requests.get(url, headers=headers, params=params, timeout=30)
-    return resp.json()
+    try:
+        return resp.json()
+    except Exception as e:
+        logger.error(f"JSON 파싱 오류: {e}, 응답: {resp.text[:200]}")
+        return {}
 
-def get_top100_by_amount(market: str, date: str) -> list:
-    """
-    거래대금 상위 100 종목 반환
-    tr_id: FHPST01710000 - 국내주식 업종/테마별 현재가 조회
-    거래대금 순위: FHPST01680000
-    """
-    # 시장코드: J=코스피, Q=코스닥
+def get_top100_by_amount(market: str) -> list:
+    """거래대금 순위 - 30건씩 최대 4회 조회"""
     mkt_code = "J" if market == "KOSPI" else "Q"
-
     result = []
-    # 거래대금 상위 조회 (한번에 30개씩, 4페이지)
-    for fid_rank in range(1, 5):
-        try:
-            data = kis_get(
-                "/uapi/domestic-stock/v1/ranking/trading-value",
-                params={
-                    "fid_cond_mrkt_div_code": mkt_code,
-                    "fid_cond_scr_div_code": "20171",
-                    "fid_input_iscd": "0000",
-                    "fid_div_cls_code": "0",
-                    "fid_blng_cls_code": "0",
-                    "fid_trgt_cls_code": "111111111",
-                    "fid_trgt_exls_cls_code": "0000000000",
-                    "fid_input_price_1": "",
-                    "fid_input_price_2": "",
-                    "fid_vol_cnt": "",
-                    "fid_input_date_1": date,
-                },
-                tr_id="FHPST01710000"
-            )
-
-            items = data.get("output", [])
-            logger.info(f"[{market}] 페이지{fid_rank} 조회: {len(items)}개")
-
-            for item in items:
-                code = item.get("mksc_shrn_iscd", "")
-                name = item.get("hts_kor_isnm", code)
-                amount_raw = float(str(item.get("acml_tr_pbmn", "0")).replace(",", ""))
-                if amount_raw >= 100000000:
-                    amount_str = f"{int(amount_raw) // 100000000:,}억"
-                elif amount_raw >= 10000:
-                    amount_str = f"{int(amount_raw) // 10000:,}만"
-                else:
-                    amount_str = "-"
-                result.append((code, name, market, amount_str))
-
-            if len(result) >= 100:
-                break
-            time.sleep(0.3)
-        except Exception as e:
-            logger.error(f"[{market}] 거래대금 조회 오류: {e}")
+    for _ in range(4):
+        data = kis_get(
+            "/uapi/domestic-stock/v1/ranking/trading-value",
+            params={
+                "fid_cond_mrkt_div_code": mkt_code,
+                "fid_cond_scr_div_code": "20171",
+                "fid_input_iscd": "0000",
+                "fid_div_cls_code": "0",
+                "fid_blng_cls_code": "0",
+                "fid_trgt_cls_code": "111111111",
+                "fid_trgt_exls_cls_code": "0000000000",
+                "fid_input_price_1": "",
+                "fid_input_price_2": "",
+                "fid_vol_cnt": "",
+                "fid_input_date_1": "",
+            },
+            tr_id="FHPST01710000"
+        )
+        items = data.get("output", [])
+        logger.info(f"[{market}] 거래대금 조회: {len(items)}개, rt_cd={data.get('rt_cd')}, msg={data.get('msg1','')[:60]}")
+        if not items:
             break
-
+        for item in items:
+            code = item.get("mksc_shrn_iscd", "").strip()
+            name = item.get("hts_kor_isnm", code).strip()
+            try:
+                amount_raw = float(str(item.get("acml_tr_pbmn", "0")).replace(",", ""))
+            except:
+                amount_raw = 0
+            if amount_raw >= 100000000:
+                amount_str = f"{int(amount_raw)//100000000:,}억"
+            elif amount_raw >= 10000:
+                amount_str = f"{int(amount_raw)//10000:,}만"
+            else:
+                amount_str = "-"
+            if code:
+                result.append((code, name, market, amount_str))
+        if len(result) >= 100:
+            break
+        time.sleep(0.3)
+    logger.info(f"[{market}] 최종 수집: {min(len(result),100)}개")
     return result[:100]
 
 def get_ohlc_history(ticker: str, start: str, end: str) -> pd.DataFrame:
-    """
-    일봉 OHLC 조회
-    tr_id: FHKST03010100 - 국내주식 기간별 시세
-    """
-    try:
-        data = kis_get(
-            "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-            params={
-                "fid_cond_mrkt_div_code": "J",
-                "fid_input_iscd": ticker,
-                "fid_input_date_1": start,
-                "fid_input_date_2": end,
-                "fid_period_div_code": "D",
-                "fid_org_adj_prc": "0"
-            },
-            tr_id="FHKST03010100"
-        )
-
-        items = data.get("output2", [])
-        if not items:
-            logger.debug(f"[{ticker}] OHLC 없음, 응답키: {list(data.keys())}")
-            return pd.DataFrame()
-
-        rows = []
-        for item in items:
-            try:
-                rows.append({
-                    "날짜":    item.get("stck_bsop_date", ""),
-                    "시가":    float(str(item.get("stck_oprc", "0")).replace(",", "")),
-                    "고가":    float(str(item.get("stck_hgpr", "0")).replace(",", "")),
-                    "저가":    float(str(item.get("stck_lwpr", "0")).replace(",", "")),
-                    "종가":    float(str(item.get("stck_clpr", "0")).replace(",", "")),
-                    "거래량":  float(str(item.get("acml_vol", "0")).replace(",", "")),
-                    "거래대금": float(str(item.get("acml_tr_pbmn", "0")).replace(",", "")),
-                })
-            except:
-                continue
-
-        df = pd.DataFrame(rows)
-        df = df[df["종가"] > 0]
-        df = df.sort_values("날짜").reset_index(drop=True)
-        return df
-
-    except Exception as e:
-        logger.error(f"[{ticker}] OHLC 오류: {e}")
+    """일봉 OHLC 조회"""
+    data = kis_get(
+        "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+        params={
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": ticker,
+            "fid_input_date_1": start,
+            "fid_input_date_2": end,
+            "fid_period_div_code": "D",
+            "fid_org_adj_prc": "0"
+        },
+        tr_id="FHKST03010100"
+    )
+    items = data.get("output2", [])
+    if not items:
         return pd.DataFrame()
+    rows = []
+    for item in items:
+        try:
+            rows.append({
+                "날짜":    item.get("stck_bsop_date", ""),
+                "시가":    float(str(item.get("stck_oprc","0")).replace(",","") or "0"),
+                "고가":    float(str(item.get("stck_hgpr","0")).replace(",","") or "0"),
+                "저가":    float(str(item.get("stck_lwpr","0")).replace(",","") or "0"),
+                "종가":    float(str(item.get("stck_clpr","0")).replace(",","") or "0"),
+                "거래대금": float(str(item.get("acml_tr_pbmn","0")).replace(",","") or "0"),
+            })
+        except:
+            continue
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df = df[df["종가"] > 0].sort_values("날짜").reset_index(drop=True)
+    return df
 
-def calc_bb(series: pd.Series, period: int, multiplier: float):
+def calc_bb(series, period, multiplier):
     mid = series.rolling(window=period).mean()
     std = series.rolling(window=period).std(ddof=0)
-    upper = mid + multiplier * std
-    lower = mid - multiplier * std
-    return float(upper.iloc[-1]), float(mid.iloc[-1]), float(lower.iloc[-1])
+    return float((mid + multiplier*std).iloc[-1]), float(mid.iloc[-1]), float((mid - multiplier*std).iloc[-1])
 
-def is_near(price: float, target: float, proximity_pct: float) -> bool:
-    if target == 0 or np.isnan(target):
+def is_near(price, target, proximity_pct):
+    if not target or np.isnan(target) or target == 0:
         return False
     return abs(price - target) / abs(target) * 100 <= proximity_pct
 
@@ -178,7 +154,7 @@ def classify_conditions(price, bb_lower, bb_mid, proximity_pct):
         conditions.append("중간선 근접")
     return conditions
 
-def get_prev_business_day(date: datetime) -> datetime:
+def get_prev_business_day(date):
     while date.weekday() >= 5:
         date -= timedelta(days=1)
     return date
@@ -194,7 +170,6 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
     today = get_prev_business_day(today)
     date_str  = today.strftime("%Y%m%d")
     start_str = (today - timedelta(days=90)).strftime("%Y%m%d")
-
     logger.info(f"분석날짜: {date_str}, 근접기준: {proximity}%")
 
     result = {
@@ -202,22 +177,19 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
         "proximity": proximity,
         "bb1": {"label": "BB1 (시가MA4·SD×4)", "below_lower": [], "near_lower": [], "below_mid": [], "near_mid": []},
         "bb2": {"label": "BB2 (종가MA20·SD×2)", "below_lower": [], "near_lower": [], "below_mid": [], "near_mid": []},
-        "overlap_lower": [],
-        "overlap_mid": [],
+        "overlap_lower": [], "overlap_mid": [],
         "summary": {"total_analyzed": 0, "bb1_matched": 0, "bb2_matched": 0, "overlap_lower_count": 0, "overlap_mid_count": 0}
     }
 
     all_tickers = []
     for market_name in ["KOSPI", "KOSDAQ"]:
-        tickers = get_top100_by_amount(market_name, date_str)
-        logger.info(f"[{market_name}] 수집: {len(tickers)}개")
+        tickers = get_top100_by_amount(market_name)
         all_tickers.extend(tickers)
         time.sleep(0.5)
 
     result["summary"]["total_analyzed"] = len(all_tickers)
     logger.info(f"전체 분석 대상: {len(all_tickers)}개")
-
-    if len(all_tickers) == 0:
+    if not all_tickers:
         logger.error("종목 목록 비어있음!")
         return result
 
@@ -228,60 +200,41 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
                 continue
             if "종가" not in df.columns or "시가" not in df.columns:
                 continue
-
             close_today = float(df["종가"].iloc[-1])
 
-            # BB1: 시가 기준, MA4, SD×4
             open_series = df["시가"].dropna()
             if len(open_series) >= 4:
-                bb1_upper, bb1_mid, bb1_lower = calc_bb(open_series, 4, 4.0)
+                _, bb1_mid, bb1_lower = calc_bb(open_series, 4, 4.0)
                 bb1_conds = classify_conditions(close_today, bb1_lower, bb1_mid, proximity)
-                stock_info = {
-                    "name": name, "code": ticker, "market": market,
-                    "price": close_today, "amount": amount_str,
-                    "bb_lower": round(bb1_lower, 0), "bb_mid": round(bb1_mid, 0)
-                }
-                matched_bb1 = False
+                si = {"name": name, "code": ticker, "market": market, "price": close_today, "amount": amount_str,
+                      "bb_lower": round(bb1_lower, 0), "bb_mid": round(bb1_mid, 0)}
+                m1 = False
                 if "하한 이탈" in bb1_conds:
-                    result["bb1"]["below_lower"].append({**stock_info, "condition": "하한 이탈"})
-                    matched_bb1 = True
+                    result["bb1"]["below_lower"].append({**si, "condition": "하한 이탈"}); m1=True
                 elif "하한 근접" in bb1_conds:
-                    result["bb1"]["near_lower"].append({**stock_info, "condition": "하한 근접"})
-                    matched_bb1 = True
+                    result["bb1"]["near_lower"].append({**si, "condition": "하한 근접"}); m1=True
                 if "중간선 하회" in bb1_conds:
-                    result["bb1"]["below_mid"].append({**stock_info, "condition": "중간선 하회"})
-                    matched_bb1 = True
+                    result["bb1"]["below_mid"].append({**si, "condition": "중간선 하회"}); m1=True
                 elif "중간선 근접" in bb1_conds:
-                    result["bb1"]["near_mid"].append({**stock_info, "condition": "중간선 근접"})
-                    matched_bb1 = True
-                if matched_bb1:
-                    result["summary"]["bb1_matched"] += 1
+                    result["bb1"]["near_mid"].append({**si, "condition": "중간선 근접"}); m1=True
+                if m1: result["summary"]["bb1_matched"] += 1
 
-            # BB2: 종가 기준, MA20, SD×2
             close_series = df["종가"].dropna()
             if len(close_series) >= 20:
-                bb2_upper, bb2_mid, bb2_lower = calc_bb(close_series, 20, 2.0)
+                _, bb2_mid, bb2_lower = calc_bb(close_series, 20, 2.0)
                 bb2_conds = classify_conditions(close_today, bb2_lower, bb2_mid, proximity)
-                stock_info2 = {
-                    "name": name, "code": ticker, "market": market,
-                    "price": close_today, "amount": amount_str,
-                    "bb_lower": round(bb2_lower, 0), "bb_mid": round(bb2_mid, 0)
-                }
-                matched_bb2 = False
+                si2 = {"name": name, "code": ticker, "market": market, "price": close_today, "amount": amount_str,
+                       "bb_lower": round(bb2_lower, 0), "bb_mid": round(bb2_mid, 0)}
+                m2 = False
                 if "하한 이탈" in bb2_conds:
-                    result["bb2"]["below_lower"].append({**stock_info2, "condition": "하한 이탈"})
-                    matched_bb2 = True
+                    result["bb2"]["below_lower"].append({**si2, "condition": "하한 이탈"}); m2=True
                 elif "하한 근접" in bb2_conds:
-                    result["bb2"]["near_lower"].append({**stock_info2, "condition": "하한 근접"})
-                    matched_bb2 = True
+                    result["bb2"]["near_lower"].append({**si2, "condition": "하한 근접"}); m2=True
                 if "중간선 하회" in bb2_conds:
-                    result["bb2"]["below_mid"].append({**stock_info2, "condition": "중간선 하회"})
-                    matched_bb2 = True
+                    result["bb2"]["below_mid"].append({**si2, "condition": "중간선 하회"}); m2=True
                 elif "중간선 근접" in bb2_conds:
-                    result["bb2"]["near_mid"].append({**stock_info2, "condition": "중간선 근접"})
-                    matched_bb2 = True
-                if matched_bb2:
-                    result["summary"]["bb2_matched"] += 1
+                    result["bb2"]["near_mid"].append({**si2, "condition": "중간선 근접"}); m2=True
+                if m2: result["summary"]["bb2_matched"] += 1
 
             if idx % 20 == 0:
                 logger.info(f"진행: {idx+1}/{len(all_tickers)}")
@@ -293,41 +246,29 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
 
     logger.info(f"BB1: {result['summary']['bb1_matched']}개, BB2: {result['summary']['bb2_matched']}개")
 
-    # 겹치는 종목
-    bb1_lower_set = set(s["code"] for s in result["bb1"]["below_lower"] + result["bb1"]["near_lower"])
-    bb2_lower_set = set(s["code"] for s in result["bb2"]["below_lower"] + result["bb2"]["near_lower"])
-    bb1_mid_set   = set(s["code"] for s in result["bb1"]["below_mid"]   + result["bb1"]["near_mid"])
-    bb2_mid_set   = set(s["code"] for s in result["bb2"]["below_mid"]   + result["bb2"]["near_mid"])
+    bb1_lower_set = set(s["code"] for s in result["bb1"]["below_lower"]+result["bb1"]["near_lower"])
+    bb2_lower_set = set(s["code"] for s in result["bb2"]["below_lower"]+result["bb2"]["near_lower"])
+    bb1_mid_set   = set(s["code"] for s in result["bb1"]["below_mid"]+result["bb1"]["near_mid"])
+    bb2_mid_set   = set(s["code"] for s in result["bb2"]["below_mid"]+result["bb2"]["near_mid"])
 
     def find_stock_info(code, bb_section):
-        for cat in ["below_lower", "near_lower", "below_mid", "near_mid"]:
+        for cat in ["below_lower","near_lower","below_mid","near_mid"]:
             for s in bb_section[cat]:
                 if s["code"] == code:
-                    return s, s.get("condition", "")
+                    return s, s.get("condition","")
         return None, ""
 
     for code in bb1_lower_set & bb2_lower_set:
-        s1, c1 = find_stock_info(code, result["bb1"])
-        _, c2  = find_stock_info(code, result["bb2"])
-        if s1:
-            result["overlap_lower"].append({
-                "name": s1["name"], "code": code, "market": s1["market"],
-                "price": s1["price"], "amount": s1["amount"],
-                "bb1_condition": c1, "bb2_condition": c2
-            })
+        s1,c1 = find_stock_info(code, result["bb1"])
+        _,c2  = find_stock_info(code, result["bb2"])
+        if s1: result["overlap_lower"].append({"name":s1["name"],"code":code,"market":s1["market"],"price":s1["price"],"amount":s1["amount"],"bb1_condition":c1,"bb2_condition":c2})
 
     for code in bb1_mid_set & bb2_mid_set:
-        s1, c1 = find_stock_info(code, result["bb1"])
-        _, c2  = find_stock_info(code, result["bb2"])
-        if s1:
-            result["overlap_mid"].append({
-                "name": s1["name"], "code": code, "market": s1["market"],
-                "price": s1["price"], "amount": s1["amount"],
-                "bb1_condition": c1, "bb2_condition": c2
-            })
+        s1,c1 = find_stock_info(code, result["bb1"])
+        _,c2  = find_stock_info(code, result["bb2"])
+        if s1: result["overlap_mid"].append({"name":s1["name"],"code":code,"market":s1["market"],"price":s1["price"],"amount":s1["amount"],"bb1_condition":c1,"bb2_condition":c2})
 
     result["summary"]["overlap_lower_count"] = len(result["overlap_lower"])
     result["summary"]["overlap_mid_count"]   = len(result["overlap_mid"])
     logger.info(f"겹치는 종목 - 하한: {result['summary']['overlap_lower_count']}개, 중간: {result['summary']['overlap_mid_count']}개")
-
     return result

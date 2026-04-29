@@ -44,19 +44,47 @@ def kis_get(path: str, params: dict, tr_id: str) -> dict:
     try:
         return resp.json()
     except Exception as e:
-        logger.error(f"JSON 파싱 오류: {e}, 응답: {resp.text[:200]}")
+        logger.error(f"JSON 파싱 오류 [{resp.status_code}]: {e}, 응답: {resp.text[:200]}")
         return {}
 
 def get_top100_by_amount(market: str) -> list:
-    """거래대금 순위 - 30건씩 최대 4회 조회"""
+    """
+    거래대금 순위 조회
+    tr_id: FHPST01710000
+    URI: /uapi/domestic-stock/v1/quotations/volume-rank  (올바른 경로)
+    """
     mkt_code = "J" if market == "KOSPI" else "Q"
     result = []
-    for _ in range(4):
-        data = kis_get(
-            "/uapi/domestic-stock/v1/ranking/trading-value",
+
+    data = kis_get(
+        "/uapi/domestic-stock/v1/quotations/volume-rank",
+        params={
+            "FID_COND_MRKT_DIV_CODE": mkt_code,
+            "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": "0000",
+            "FID_DIV_CLS_CODE": "0",
+            "FID_BLNG_CLS_CODE": "0",
+            "FID_TRGT_CLS_CODE": "111111111",
+            "FID_TRGT_EXLS_CLS_CODE": "0000000000",
+            "FID_INPUT_PRICE_1": "",
+            "FID_INPUT_PRICE_2": "",
+            "FID_VOL_CNT": "",
+            "FID_INPUT_DATE_1": "",
+        },
+        tr_id="FHPST01710000"
+    )
+
+    items = data.get("output", [])
+    logger.info(f"[{market}] volume-rank 조회: {len(items)}개, rt_cd={data.get('rt_cd')}, msg={data.get('msg1','')[:60]}")
+
+    if not items:
+        # 대안: 거래량 순위로 종목 목록 확보 후 거래대금으로 정렬
+        logger.info(f"[{market}] 대안 방법 시도: inquire-daily-trade-volume")
+        data2 = kis_get(
+            "/uapi/domestic-stock/v1/ranking/trade-amount",
             params={
                 "fid_cond_mrkt_div_code": mkt_code,
-                "fid_cond_scr_div_code": "20171",
+                "fid_cond_scr_div_code": "20172",
                 "fid_input_iscd": "0000",
                 "fid_div_cls_code": "0",
                 "fid_blng_cls_code": "0",
@@ -67,35 +95,32 @@ def get_top100_by_amount(market: str) -> list:
                 "fid_vol_cnt": "",
                 "fid_input_date_1": "",
             },
-            tr_id="FHPST01710000"
+            tr_id="FHPST01720000"
         )
-        items = data.get("output", [])
-        logger.info(f"[{market}] 거래대금 조회: {len(items)}개, rt_cd={data.get('rt_cd')}, msg={data.get('msg1','')[:60]}")
-        if not items:
-            break
-        for item in items:
-            code = item.get("mksc_shrn_iscd", "").strip()
-            name = item.get("hts_kor_isnm", code).strip()
-            try:
-                amount_raw = float(str(item.get("acml_tr_pbmn", "0")).replace(",", ""))
-            except:
-                amount_raw = 0
-            if amount_raw >= 100000000:
-                amount_str = f"{int(amount_raw)//100000000:,}억"
-            elif amount_raw >= 10000:
-                amount_str = f"{int(amount_raw)//10000:,}만"
-            else:
-                amount_str = "-"
-            if code:
-                result.append((code, name, market, amount_str))
-        if len(result) >= 100:
-            break
-        time.sleep(0.3)
-    logger.info(f"[{market}] 최종 수집: {min(len(result),100)}개")
+        items = data2.get("output", [])
+        logger.info(f"[{market}] trade-amount 대안 조회: {len(items)}개, rt_cd={data2.get('rt_cd')}, msg={data2.get('msg1','')[:60]}")
+
+    for item in items:
+        code = item.get("mksc_shrn_iscd", "").strip()
+        name = item.get("hts_kor_isnm", code).strip()
+        try:
+            amount_raw = float(str(item.get("acml_tr_pbmn", "0")).replace(",", ""))
+        except:
+            amount_raw = 0
+        if amount_raw >= 100000000:
+            amount_str = f"{int(amount_raw)//100000000:,}억"
+        elif amount_raw >= 10000:
+            amount_str = f"{int(amount_raw)//10000:,}만"
+        else:
+            amount_str = "-"
+        if code:
+            result.append((code, name, market, amount_str))
+
+    logger.info(f"[{market}] 최종 수집: {len(result[:100])}개")
     return result[:100]
 
 def get_ohlc_history(ticker: str, start: str, end: str) -> pd.DataFrame:
-    """일봉 OHLC 조회"""
+    """일봉 OHLC 조회 - FHKST03010100"""
     data = kis_get(
         "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
         params={
@@ -133,7 +158,7 @@ def get_ohlc_history(ticker: str, start: str, end: str) -> pd.DataFrame:
 def calc_bb(series, period, multiplier):
     mid = series.rolling(window=period).mean()
     std = series.rolling(window=period).std(ddof=0)
-    return float((mid + multiplier*std).iloc[-1]), float(mid.iloc[-1]), float((mid - multiplier*std).iloc[-1])
+    return float((mid+multiplier*std).iloc[-1]), float(mid.iloc[-1]), float((mid-multiplier*std).iloc[-1])
 
 def is_near(price, target, proximity_pct):
     if not target or np.isnan(target) or target == 0:
@@ -206,8 +231,8 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
             if len(open_series) >= 4:
                 _, bb1_mid, bb1_lower = calc_bb(open_series, 4, 4.0)
                 bb1_conds = classify_conditions(close_today, bb1_lower, bb1_mid, proximity)
-                si = {"name": name, "code": ticker, "market": market, "price": close_today, "amount": amount_str,
-                      "bb_lower": round(bb1_lower, 0), "bb_mid": round(bb1_mid, 0)}
+                si = {"name": name, "code": ticker, "market": market, "price": close_today,
+                      "amount": amount_str, "bb_lower": round(bb1_lower,0), "bb_mid": round(bb1_mid,0)}
                 m1 = False
                 if "하한 이탈" in bb1_conds:
                     result["bb1"]["below_lower"].append({**si, "condition": "하한 이탈"}); m1=True
@@ -223,8 +248,8 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
             if len(close_series) >= 20:
                 _, bb2_mid, bb2_lower = calc_bb(close_series, 20, 2.0)
                 bb2_conds = classify_conditions(close_today, bb2_lower, bb2_mid, proximity)
-                si2 = {"name": name, "code": ticker, "market": market, "price": close_today, "amount": amount_str,
-                       "bb_lower": round(bb2_lower, 0), "bb_mid": round(bb2_mid, 0)}
+                si2 = {"name": name, "code": ticker, "market": market, "price": close_today,
+                       "amount": amount_str, "bb_lower": round(bb2_lower,0), "bb_mid": round(bb2_mid,0)}
                 m2 = False
                 if "하한 이탈" in bb2_conds:
                     result["bb2"]["below_lower"].append({**si2, "condition": "하한 이탈"}); m2=True
@@ -261,12 +286,14 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
     for code in bb1_lower_set & bb2_lower_set:
         s1,c1 = find_stock_info(code, result["bb1"])
         _,c2  = find_stock_info(code, result["bb2"])
-        if s1: result["overlap_lower"].append({"name":s1["name"],"code":code,"market":s1["market"],"price":s1["price"],"amount":s1["amount"],"bb1_condition":c1,"bb2_condition":c2})
+        if s1: result["overlap_lower"].append({"name":s1["name"],"code":code,"market":s1["market"],
+            "price":s1["price"],"amount":s1["amount"],"bb1_condition":c1,"bb2_condition":c2})
 
     for code in bb1_mid_set & bb2_mid_set:
         s1,c1 = find_stock_info(code, result["bb1"])
         _,c2  = find_stock_info(code, result["bb2"])
-        if s1: result["overlap_mid"].append({"name":s1["name"],"code":code,"market":s1["market"],"price":s1["price"],"amount":s1["amount"],"bb1_condition":c1,"bb2_condition":c2})
+        if s1: result["overlap_mid"].append({"name":s1["name"],"code":code,"market":s1["market"],
+            "price":s1["price"],"amount":s1["amount"],"bb1_condition":c1,"bb2_condition":c2})
 
     result["summary"]["overlap_lower_count"] = len(result["overlap_lower"])
     result["summary"]["overlap_mid_count"]   = len(result["overlap_mid"])

@@ -11,8 +11,7 @@ logger = logging.getLogger(__name__)
 
 APP_KEY    = os.environ.get("KIS_APP_KEY", "")
 APP_SECRET = os.environ.get("KIS_APP_SECRET", "")
-# 9443 포트 대신 443 포트 사용
-BASE_URL   = "https://openapi.koreainvestment.com:443"
+BASE_URL   = "https://openapi.koreainvestment.com:9443"
 
 _token_cache = {"token": None, "expires": None}
 
@@ -20,8 +19,7 @@ def get_access_token() -> str:
     now = datetime.now()
     if _token_cache["token"] and _token_cache["expires"] and now < _token_cache["expires"]:
         return _token_cache["token"]
-    # 토큰 발급은 9443으로
-    url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
+    url = f"{BASE_URL}/oauth2/tokenP"
     body = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
     resp = requests.post(url, json=body, timeout=15)
     data = resp.json()
@@ -41,32 +39,31 @@ def kis_get(path: str, params: dict, tr_id: str, timeout: int = 20) -> dict:
         "custtype": "P",
         "Content-Type": "application/json; charset=utf-8"
     }
-    # 443 포트로 시도, 실패하면 9443으로 재시도
-    for base in [BASE_URL, "https://openapi.koreainvestment.com:9443"]:
-        try:
-            url = f"{base}{path}"
-            resp = requests.get(url, headers=headers, params=params, timeout=timeout)
-            if resp.status_code == 200 and resp.text:
-                return resp.json()
-        except requests.exceptions.Timeout:
-            logger.warning(f"타임아웃: {base}{path}")
-        except Exception as e:
-            logger.warning(f"오류 [{base}]: {e}")
-    return {}
+    url = f"{BASE_URL}{path}"
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+        if resp.status_code == 200 and resp.text:
+            return resp.json()
+        logger.warning(f"응답 이상: status={resp.status_code}, text={resp.text[:100]}")
+        return {}
+    except requests.exceptions.Timeout:
+        logger.error(f"타임아웃: {path}")
+        return {}
+    except Exception as e:
+        logger.error(f"오류 [{path}]: {e}")
+        return {}
 
 def is_valid_code(code: str) -> bool:
-    """정상 종목코드 여부 확인 (6자리 숫자)"""
     if not code:
         return False
     code = code.strip()
     return len(code) == 6 and code.isdigit()
 
 def get_top100_by_amount(market: str) -> list:
-    """거래대금 순위 상위 100개 - 정상 종목코드만 필터링"""
     mkt_code = "J" if market == "KOSPI" else "NQ"
     result = []
 
-    for _ in range(5):  # 최대 5번 호출로 100개 확보
+    for attempt in range(5):
         data = kis_get(
             "/uapi/domestic-stock/v1/quotations/volume-rank",
             params={
@@ -82,48 +79,38 @@ def get_top100_by_amount(market: str) -> list:
                 "FID_VOL_CNT": "",
                 "FID_INPUT_DATE_1": "",
             },
-            tr_id="FHPST01710000"
+            tr_id="FHPST01710000",
+            timeout=25
         )
         items = data.get("output", [])
-        logger.info(f"[{market}] volume-rank: {len(items)}개, rt_cd={data.get('rt_cd')}")
+        logger.info(f"[{market}] volume-rank 시도{attempt+1}: {len(items)}개, rt_cd={data.get('rt_cd')}, msg={data.get('msg1','')[:40]}")
 
         for item in items:
             code = item.get("mksc_shrn_iscd", "").strip()
             name = item.get("hts_kor_isnm", code).strip()
-
-            # 비정상 코드 필터링 (ETF/ETN/스팩 등 제외하지 않고 코드 형식만 확인)
             if not is_valid_code(code):
-                logger.debug(f"비정상 코드 스킵: {code} ({name})")
                 continue
-
             try:
                 amount_raw = float(str(item.get("acml_tr_pbmn", "0")).replace(",", ""))
             except:
                 amount_raw = 0
-
             if amount_raw >= 100000000:
                 amount_str = f"{int(amount_raw)//100000000:,}억"
             elif amount_raw >= 10000:
                 amount_str = f"{int(amount_raw)//10000:,}만"
             else:
                 amount_str = "-"
-
-            # 중복 제거
             if code not in [r[0] for r in result]:
                 result.append((code, name, market, amount_str))
 
-        if len(result) >= 100 or len(items) == 0:
+        if len(result) >= 100 or (len(items) == 0 and attempt > 0):
             break
-        time.sleep(0.3)
+        time.sleep(0.5)
 
     logger.info(f"[{market}] 유효 종목 수집: {len(result[:100])}개")
     return result[:100]
 
 def get_ohlc_history(ticker: str, start: str, end: str, market: str) -> pd.DataFrame:
-    """
-    일봉 OHLC - 기간별 시세 조회
-    tr_id: FHKST03010100
-    """
     mkt_code = "J" if market == "KOSPI" else "NQ"
 
     data = kis_get(
@@ -137,17 +124,15 @@ def get_ohlc_history(ticker: str, start: str, end: str, market: str) -> pd.DataF
             "fid_org_adj_prc": "0"
         },
         tr_id="FHKST03010100",
-        timeout=20
+        timeout=25
     )
 
     items = data.get("output2", [])
-
-    # output2 없으면 output1 시도
     if not items:
         items = data.get("output1", [])
 
+    # 대안: 최근 30일 API
     if not items:
-        # 대안: 최근 30일 API
         data2 = kis_get(
             "/uapi/domestic-stock/v1/quotations/inquire-daily-price",
             params={
@@ -157,7 +142,7 @@ def get_ohlc_history(ticker: str, start: str, end: str, market: str) -> pd.DataF
                 "fid_org_adj_prc": "0"
             },
             tr_id="FHKST01010400",
-            timeout=15
+            timeout=20
         )
         items = data2.get("output", [])
 
@@ -168,10 +153,10 @@ def get_ohlc_history(ticker: str, start: str, end: str, market: str) -> pd.DataF
     for item in items:
         try:
             date_val = item.get("stck_bsop_date", "")
-            open_p   = float(str(item.get("stck_oprc","0")).replace(",","") or "0")
-            close_p  = float(str(item.get("stck_clpr","0")).replace(",","") or "0")
-            high_p   = float(str(item.get("stck_hgpr","0")).replace(",","") or "0")
-            low_p    = float(str(item.get("stck_lwpr","0")).replace(",","") or "0")
+            open_p  = float(str(item.get("stck_oprc","0")).replace(",","") or "0")
+            close_p = float(str(item.get("stck_clpr","0")).replace(",","") or "0")
+            high_p  = float(str(item.get("stck_hgpr","0")).replace(",","") or "0")
+            low_p   = float(str(item.get("stck_lwpr","0")).replace(",","") or "0")
             if close_p > 0:
                 rows.append({"날짜": date_val, "시가": open_p, "고가": high_p, "저가": low_p, "종가": close_p})
         except:
@@ -181,7 +166,6 @@ def get_ohlc_history(ticker: str, start: str, end: str, market: str) -> pd.DataF
         return pd.DataFrame()
 
     df = pd.DataFrame(rows).sort_values("날짜").reset_index(drop=True)
-    # 요청 기간 필터
     df = df[(df["날짜"] >= start) & (df["날짜"] <= end)]
     return df
 

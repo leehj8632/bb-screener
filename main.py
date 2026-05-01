@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from screener import run_screener, get_access_token, kis_get, get_ohlc_history, BASE_URL, APP_KEY, APP_SECRET
+from screener import run_screener
 import uvicorn
 import os
 import requests
@@ -23,64 +23,44 @@ def analyze(proximity: float = 3.0, date: str = None):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@app.get("/api/test")
-def test_api():
+@app.get("/api/test-all")
+def test_all():
     results = {}
-    try:
-        token = get_access_token()
-        results["token"] = "OK" if token else "EMPTY"
-    except Exception as e:
-        results["token"] = f"ERROR: {e}"
 
-    # 거래대금 순위 상위 5개 종목코드 확인
+    # 1. pykrx 테스트 - 코스피 거래대금 상위
     try:
-        data = kis_get(
-            "/uapi/domestic-stock/v1/quotations/volume-rank",
-            params={
-                "FID_COND_MRKT_DIV_CODE": "J",
-                "FID_COND_SCR_DIV_CODE": "20171",
-                "FID_INPUT_ISCD": "0000",
-                "FID_DIV_CLS_CODE": "0",
-                "FID_BLNG_CLS_CODE": "0",
-                "FID_TRGT_CLS_CODE": "111111111",
-                "FID_TRGT_EXLS_CLS_CODE": "0000000000",
-                "FID_INPUT_PRICE_1": "",
-                "FID_INPUT_PRICE_2": "",
-                "FID_VOL_CNT": "",
-                "FID_INPUT_DATE_1": "",
-            },
-            tr_id="FHPST01710000"
-        )
-        items = data.get("output", [])[:5]
-        results["kospi_top5"] = [
-            {"code": i.get("mksc_shrn_iscd"), "name": i.get("hts_kor_isnm"), "amount": i.get("acml_tr_pbmn")}
-            for i in items
-        ]
+        from pykrx import stock
+        df = stock.get_market_ohlcv_by_ticker("20260402", market="KOSPI")
+        results["pykrx_kospi_count"] = len(df)
+        results["pykrx_kospi_columns"] = df.columns.tolist()
+        if not df.empty and "거래대금" in df.columns:
+            top5 = df.sort_values("거래대금", ascending=False).head(5)
+            results["pykrx_kospi_top5"] = [
+                {"code": idx, "name": stock.get_market_ticker_name(idx), "amount": int(row["거래대금"])}
+                for idx, row in top5.iterrows()
+            ]
     except Exception as e:
-        results["kospi_top5"] = f"ERROR: {e}"
+        results["pykrx_kospi"] = f"ERROR: {e}"
 
-    # 하이브 (352820) OHLC 직접 조회
+    # 2. pykrx OHLC 테스트 - 하이브 (352820)
     try:
-        df = get_ohlc_history("352820", "20260102", "20260402", "KOSPI")
-        if df is not None and not df.empty:
-            results["hybe_ohlc_count"] = len(df)
-            results["hybe_latest"] = df.tail(3).to_dict(orient="records")
-            results["hybe_columns"] = df.columns.tolist()
-        else:
-            results["hybe_ohlc"] = "EMPTY"
+        from pykrx import stock
+        df2 = stock.get_market_ohlcv_by_date("20260113", "20260402", "352820")
+        results["pykrx_hybe_count"] = len(df2)
+        results["pykrx_hybe_columns"] = df2.columns.tolist()
+        if not df2.empty:
+            results["pykrx_hybe_latest3"] = df2.tail(3).reset_index().to_dict(orient="records")
     except Exception as e:
-        results["hybe_ohlc"] = f"ERROR: {e}"
+        results["pykrx_hybe"] = f"ERROR: {e}"
 
-    # 카카오 (035720) OHLC 직접 조회
+    # 3. 네이버 증권 접속 테스트
     try:
-        df2 = get_ohlc_history("035720", "20260102", "20260402", "KOSPI")
-        if df2 is not None and not df2.empty:
-            results["kakao_ohlc_count"] = len(df2)
-            results["kakao_latest"] = df2.tail(3).to_dict(orient="records")
-        else:
-            results["kakao_ohlc"] = "EMPTY"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = requests.get("https://finance.naver.com/sise/sise_quant.naver?sosok=0", headers=headers, timeout=10)
+        results["naver_status"] = resp.status_code
+        results["naver_length"] = len(resp.text)
     except Exception as e:
-        results["kakao_ohlc"] = f"ERROR: {e}"
+        results["naver"] = f"ERROR: {e}"
 
     return results
 

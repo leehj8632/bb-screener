@@ -29,7 +29,7 @@ def get_access_token() -> str:
     logger.info("토큰 발급 완료")
     return token
 
-def kis_get(path: str, params: dict, tr_id: str) -> dict:
+def kis_get(path: str, params: dict, tr_id: str, timeout: int = 30) -> dict:
     token = get_access_token()
     headers = {
         "authorization": f"Bearer {token}",
@@ -40,102 +40,91 @@ def kis_get(path: str, params: dict, tr_id: str) -> dict:
         "Content-Type": "application/json; charset=utf-8"
     }
     url = f"{BASE_URL}{path}"
-    resp = requests.get(url, headers=headers, params=params, timeout=30)
     try:
+        resp = requests.get(url, headers=headers, params=params, timeout=timeout)
         return resp.json()
+    except requests.exceptions.Timeout:
+        logger.error(f"타임아웃: {path}")
+        return {}
     except Exception as e:
-        logger.error(f"JSON 파싱 오류 [{resp.status_code}]: {e}, 응답: {resp.text[:200]}")
+        logger.error(f"오류 [{path}]: {e}")
         return {}
 
 def get_top100_by_amount(market: str) -> list:
-    """
-    거래대금 순위 조회
-    tr_id: FHPST01710000
-    URI: /uapi/domestic-stock/v1/quotations/volume-rank  (올바른 경로)
-    """
-    mkt_code = "J" if market == "KOSPI" else "Q"
+    """거래대금 순위 조회 - 페이지 반복으로 100개 확보"""
+    # KOSPI: J, KOSDAQ: NQ
+    mkt_code = "J" if market == "KOSPI" else "NQ"
     result = []
 
-    data = kis_get(
-        "/uapi/domestic-stock/v1/quotations/volume-rank",
-        params={
-            "FID_COND_MRKT_DIV_CODE": mkt_code,
-            "FID_COND_SCR_DIV_CODE": "20171",
-            "FID_INPUT_ISCD": "0000",
-            "FID_DIV_CLS_CODE": "0",
-            "FID_BLNG_CLS_CODE": "0",
-            "FID_TRGT_CLS_CODE": "111111111",
-            "FID_TRGT_EXLS_CLS_CODE": "0000000000",
-            "FID_INPUT_PRICE_1": "",
-            "FID_INPUT_PRICE_2": "",
-            "FID_VOL_CNT": "",
-            "FID_INPUT_DATE_1": "",
-        },
-        tr_id="FHPST01710000"
-    )
-
-    items = data.get("output", [])
-    logger.info(f"[{market}] volume-rank 조회: {len(items)}개, rt_cd={data.get('rt_cd')}, msg={data.get('msg1','')[:60]}")
-
-    if not items:
-        # 대안: 거래량 순위로 종목 목록 확보 후 거래대금으로 정렬
-        logger.info(f"[{market}] 대안 방법 시도: inquire-daily-trade-volume")
-        data2 = kis_get(
-            "/uapi/domestic-stock/v1/ranking/trade-amount",
+    # volume-rank는 30개씩 반환 → 4번 호출
+    for _ in range(4):
+        data = kis_get(
+            "/uapi/domestic-stock/v1/quotations/volume-rank",
             params={
-                "fid_cond_mrkt_div_code": mkt_code,
-                "fid_cond_scr_div_code": "20172",
-                "fid_input_iscd": "0000",
-                "fid_div_cls_code": "0",
-                "fid_blng_cls_code": "0",
-                "fid_trgt_cls_code": "111111111",
-                "fid_trgt_exls_cls_code": "0000000000",
-                "fid_input_price_1": "",
-                "fid_input_price_2": "",
-                "fid_vol_cnt": "",
-                "fid_input_date_1": "",
+                "FID_COND_MRKT_DIV_CODE": mkt_code,
+                "FID_COND_SCR_DIV_CODE": "20171",
+                "FID_INPUT_ISCD": "0000",
+                "FID_DIV_CLS_CODE": "0",
+                "FID_BLNG_CLS_CODE": "0",
+                "FID_TRGT_CLS_CODE": "111111111",
+                "FID_TRGT_EXLS_CLS_CODE": "0000000000",
+                "FID_INPUT_PRICE_1": "",
+                "FID_INPUT_PRICE_2": "",
+                "FID_VOL_CNT": "",
+                "FID_INPUT_DATE_1": "",
             },
-            tr_id="FHPST01720000"
+            tr_id="FHPST01710000"
         )
-        items = data2.get("output", [])
-        logger.info(f"[{market}] trade-amount 대안 조회: {len(items)}개, rt_cd={data2.get('rt_cd')}, msg={data2.get('msg1','')[:60]}")
+        items = data.get("output", [])
+        logger.info(f"[{market}] volume-rank: {len(items)}개, rt_cd={data.get('rt_cd')}, msg={data.get('msg1','')[:40]}")
 
-    for item in items:
-        code = item.get("mksc_shrn_iscd", "").strip()
-        name = item.get("hts_kor_isnm", code).strip()
-        try:
-            amount_raw = float(str(item.get("acml_tr_pbmn", "0")).replace(",", ""))
-        except:
-            amount_raw = 0
-        if amount_raw >= 100000000:
-            amount_str = f"{int(amount_raw)//100000000:,}억"
-        elif amount_raw >= 10000:
-            amount_str = f"{int(amount_raw)//10000:,}만"
-        else:
-            amount_str = "-"
-        if code:
-            result.append((code, name, market, amount_str))
+        for item in items:
+            code = item.get("mksc_shrn_iscd", "").strip()
+            name = item.get("hts_kor_isnm", code).strip()
+            try:
+                amount_raw = float(str(item.get("acml_tr_pbmn", "0")).replace(",", ""))
+            except:
+                amount_raw = 0
+            if amount_raw >= 100000000:
+                amount_str = f"{int(amount_raw)//100000000:,}억"
+            elif amount_raw >= 10000:
+                amount_str = f"{int(amount_raw)//10000:,}만"
+            else:
+                amount_str = "-"
+            if code and not any(r[0] == code for r in result):
+                result.append((code, name, market, amount_str))
+
+        if len(result) >= 100 or len(items) == 0:
+            break
+        time.sleep(0.3)
 
     logger.info(f"[{market}] 최종 수집: {len(result[:100])}개")
     return result[:100]
 
-def get_ohlc_history(ticker: str, start: str, end: str) -> pd.DataFrame:
-    """일봉 OHLC 조회 - FHKST03010100"""
+def get_ohlc_history(ticker: str, start: str, end: str, market: str) -> pd.DataFrame:
+    """
+    일봉 OHLC - inquire-daily-price 사용 (단기 조회용)
+    tr_id: FHKST01010400
+    """
+    mkt_code = "J" if market == "KOSPI" else "NQ"
+
     data = kis_get(
-        "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+        "/uapi/domestic-stock/v1/quotations/inquire-daily-price",
         params={
-            "fid_cond_mrkt_div_code": "J",
+            "fid_cond_mrkt_div_code": mkt_code,
             "fid_input_iscd": ticker,
-            "fid_input_date_1": start,
-            "fid_input_date_2": end,
             "fid_period_div_code": "D",
             "fid_org_adj_prc": "0"
         },
-        tr_id="FHKST03010100"
+        tr_id="FHKST01010400",
+        timeout=15
     )
-    items = data.get("output2", [])
+
+    items = data.get("output", [])
     if not items:
+        logger.debug(f"[{ticker}] OHLC 없음, rt_cd={data.get('rt_cd')}")
         return pd.DataFrame()
+
     rows = []
     for item in items:
         try:
@@ -145,14 +134,20 @@ def get_ohlc_history(ticker: str, start: str, end: str) -> pd.DataFrame:
                 "고가":    float(str(item.get("stck_hgpr","0")).replace(",","") or "0"),
                 "저가":    float(str(item.get("stck_lwpr","0")).replace(",","") or "0"),
                 "종가":    float(str(item.get("stck_clpr","0")).replace(",","") or "0"),
-                "거래대금": float(str(item.get("acml_tr_pbmn","0")).replace(",","") or "0"),
             })
         except:
             continue
+
     if not rows:
         return pd.DataFrame()
+
     df = pd.DataFrame(rows)
     df = df[df["종가"] > 0].sort_values("날짜").reset_index(drop=True)
+
+    # start 날짜 이후만 필터
+    if "날짜" in df.columns and start:
+        df = df[df["날짜"] >= start.replace("-","")]
+
     return df
 
 def calc_bb(series, period, multiplier):
@@ -220,7 +215,7 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
 
     for idx, (ticker, name, market, amount_str) in enumerate(all_tickers):
         try:
-            df = get_ohlc_history(ticker, start_str, date_str)
+            df = get_ohlc_history(ticker, start_str, date_str, market)
             if df is None or df.empty or len(df) < 4:
                 continue
             if "종가" not in df.columns or "시가" not in df.columns:
@@ -261,9 +256,9 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
                     result["bb2"]["near_mid"].append({**si2, "condition": "중간선 근접"}); m2=True
                 if m2: result["summary"]["bb2_matched"] += 1
 
-            if idx % 20 == 0:
+            if idx % 10 == 0:
                 logger.info(f"진행: {idx+1}/{len(all_tickers)}")
-            time.sleep(0.1)
+            time.sleep(0.2)
 
         except Exception as e:
             logger.error(f"[{ticker}] 오류: {e}")

@@ -22,34 +22,31 @@ def get_prev_business_day(date: datetime) -> datetime:
 
 def get_top100_naver(market: str, date: str) -> list:
     """
-    네이버 증권에서 거래대금 상위 100종목 수집
-    market: KOSPI(sosok=0), KOSDAQ(sosok=1)
-    date: YYYYMMDD
+    네이버 증권 거래대금 순위에서 상위 100종목 수집
+    컬럼: 0:순위 1:종목명 2:현재가 3:등락 4:등락률 5:거래량 6:거래대금 7:매도호가 8:매수호가 ...
     """
     sosok = "0" if market == "KOSPI" else "1"
-    # 네이버 날짜 형식: YYYY.MM.DD
-    date_fmt = f"{date[:4]}.{date[4:6]}.{date[6:]}"
-
     result = []
-    for page in range(1, 5):  # 4페이지 × 30종목 = 최대 120종목
-        try:
-            url = f"https://finance.naver.com/sise/sise_quant.naver"
-            params = {"sosok": sosok, "page": page}
-            resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
-            soup = BeautifulSoup(resp.text, "html.parser")
 
+    for page in range(1, 5):
+        try:
+            resp = requests.get(
+                "https://finance.naver.com/sise/sise_quant.naver",
+                headers=HEADERS,
+                params={"sosok": sosok, "page": page},
+                timeout=15
+            )
+            soup = BeautifulSoup(resp.text, "html.parser")
             table = soup.find("table", {"class": "type_2"})
             if not table:
                 break
 
-            rows = table.find_all("tr")
             page_count = 0
-            for row in rows:
+            for row in table.find_all("tr"):
                 cols = row.find_all("td")
-                if len(cols) < 10:
+                if len(cols) < 7:
                     continue
                 try:
-                    # 종목명과 코드
                     name_tag = cols[1].find("a")
                     if not name_tag:
                         continue
@@ -59,14 +56,16 @@ def get_top100_naver(market: str, date: str) -> list:
                     if not code or len(code) != 6:
                         continue
 
-                    # 거래대금 (억원)
-                    amount_text = cols[9].text.strip().replace(",", "")
+                    # 거래대금: 6번째 컬럼 (단위: 백만원)
+                    amount_text = cols[6].text.strip().replace(",", "")
                     if not amount_text or amount_text == "-":
                         continue
-                    amount_억 = int(amount_text)
-                    amount_str = f"{amount_억:,}억"
+                    amount_mil = int(amount_text)  # 백만원 단위
+                    amount_억 = amount_mil / 100   # 억원으로 변환
+                    amount_str = f"{int(amount_억):,}억"
 
-                    result.append((code, name, market, amount_str, amount_억))
+                    if code not in [r[0] for r in result]:
+                        result.append((code, name, market, amount_str, amount_억))
                     page_count += 1
                 except:
                     continue
@@ -79,14 +78,14 @@ def get_top100_naver(market: str, date: str) -> list:
             time.sleep(0.3)
 
         except Exception as e:
-            logger.error(f"[{market}] 네이버 크롤링 오류 page{page}: {e}")
+            logger.error(f"[{market}] 네이버 오류 page{page}: {e}")
             break
 
-    # 거래대금 기준 정렬 후 상위 100개
+    # 거래대금 내림차순 정렬
     result.sort(key=lambda x: x[4], reverse=True)
-    result = [(code, name, mkt, amount_str) for code, name, mkt, amount_str, _ in result[:100]]
-    logger.info(f"[{market}] 최종 수집: {len(result)}개")
-    return result
+    final = [(code, name, mkt, amount_str) for code, name, mkt, amount_str, _ in result[:100]]
+    logger.info(f"[{market}] 최종 수집: {len(final)}개")
+    return final
 
 def get_ohlc_history(ticker: str, start: str, end: str) -> pd.DataFrame:
     """pykrx로 일봉 OHLC 조회"""
@@ -104,7 +103,7 @@ def get_ohlc_history(ticker: str, start: str, end: str) -> pd.DataFrame:
 def calc_bb(series: pd.Series, period: int, multiplier: float):
     mid = series.rolling(window=period).mean()
     std = series.rolling(window=period).std(ddof=0)
-    return float((mid + multiplier*std).iloc[-1]), float(mid.iloc[-1]), float((mid - multiplier*std).iloc[-1])
+    return float((mid+multiplier*std).iloc[-1]), float(mid.iloc[-1]), float((mid-multiplier*std).iloc[-1])
 
 def is_near(price, target, proximity_pct):
     if not target or np.isnan(target) or target == 0:
@@ -147,7 +146,6 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
         "summary": {"total_analyzed": 0, "bb1_matched": 0, "bb2_matched": 0, "overlap_lower_count": 0, "overlap_mid_count": 0}
     }
 
-    # 네이버에서 거래대금 상위 100종목 수집
     all_tickers = []
     for market_name in ["KOSPI", "KOSDAQ"]:
         tickers = get_top100_naver(market_name, date_str)
@@ -166,7 +164,6 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
             df = get_ohlc_history(ticker, start_str, date_str)
             if df is None or df.empty or len(df) < 4:
                 continue
-
             close_today = float(df["종가"].iloc[-1])
 
             # BB1: 시가 기준, MA4, SD×4

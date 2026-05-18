@@ -4,64 +4,97 @@ import numpy as np
 from datetime import datetime, timedelta
 import time
 import logging
+import requests
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://finance.naver.com"
+}
 
 def get_prev_business_day(date: datetime) -> datetime:
     while date.weekday() >= 5:
         date -= timedelta(days=1)
     return date
 
-def get_top100_by_amount(market: str, date: str) -> list:
-    """거래대금 상위 100 종목 반환"""
-    try:
-        # 전종목 시세 (거래량 포함)
-        df_ohlcv = stock.get_market_ohlcv_by_ticker(date, market=market)
-        logger.info(f"[{market}] ohlcv 컬럼: {df_ohlcv.columns.tolist()}")
+def get_top100_naver(market: str, date: str) -> list:
+    """
+    네이버 증권에서 거래대금 상위 100종목 수집
+    market: KOSPI(sosok=0), KOSDAQ(sosok=1)
+    date: YYYYMMDD
+    """
+    sosok = "0" if market == "KOSPI" else "1"
+    # 네이버 날짜 형식: YYYY.MM.DD
+    date_fmt = f"{date[:4]}.{date[4:6]}.{date[6:]}"
 
-        # 거래대금 = 거래량 × 종가 로 계산 (거래대금 컬럼 없을 때)
-        if "거래대금" not in df_ohlcv.columns:
-            if "거래량" in df_ohlcv.columns and "종가" in df_ohlcv.columns:
-                df_ohlcv["거래대금"] = df_ohlcv["거래량"] * df_ohlcv["종가"]
-            else:
-                logger.error(f"[{market}] 거래대금 계산 불가: {df_ohlcv.columns.tolist()}")
-                return []
+    result = []
+    for page in range(1, 5):  # 4페이지 × 30종목 = 최대 120종목
+        try:
+            url = f"https://finance.naver.com/sise/sise_quant.naver"
+            params = {"sosok": sosok, "page": page}
+            resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-        df_sorted = df_ohlcv.sort_values("거래대금", ascending=False).head(100)
-        logger.info(f"[{market}] 거래대금 상위 100 수집 완료")
+            table = soup.find("table", {"class": "type_2"})
+            if not table:
+                break
 
-        result = []
-        for ticker in df_sorted.index:
-            try:
-                name = stock.get_market_ticker_name(ticker)
-            except:
-                name = ticker
-            amount_raw = int(df_sorted.loc[ticker, "거래대금"])
-            if amount_raw >= 100000000:
-                amount_str = f"{amount_raw // 100000000:,}억"
-            elif amount_raw >= 10000:
-                amount_str = f"{amount_raw // 10000:,}만"
-            else:
-                amount_str = "-"
-            result.append((ticker, name, market, amount_str))
+            rows = table.find_all("tr")
+            page_count = 0
+            for row in rows:
+                cols = row.find_all("td")
+                if len(cols) < 10:
+                    continue
+                try:
+                    # 종목명과 코드
+                    name_tag = cols[1].find("a")
+                    if not name_tag:
+                        continue
+                    name = name_tag.text.strip()
+                    href = name_tag.get("href", "")
+                    code = href.split("code=")[-1].strip() if "code=" in href else ""
+                    if not code or len(code) != 6:
+                        continue
 
-        return result
+                    # 거래대금 (억원)
+                    amount_text = cols[9].text.strip().replace(",", "")
+                    if not amount_text or amount_text == "-":
+                        continue
+                    amount_억 = int(amount_text)
+                    amount_str = f"{amount_억:,}억"
 
-    except Exception as e:
-        logger.error(f"[{market}] get_top100 오류: {e}")
-        return []
+                    result.append((code, name, market, amount_str, amount_억))
+                    page_count += 1
+                except:
+                    continue
+
+            logger.info(f"[{market}] 네이버 page{page}: {page_count}개")
+            if page_count == 0:
+                break
+            if len(result) >= 100:
+                break
+            time.sleep(0.3)
+
+        except Exception as e:
+            logger.error(f"[{market}] 네이버 크롤링 오류 page{page}: {e}")
+            break
+
+    # 거래대금 기준 정렬 후 상위 100개
+    result.sort(key=lambda x: x[4], reverse=True)
+    result = [(code, name, mkt, amount_str) for code, name, mkt, amount_str, _ in result[:100]]
+    logger.info(f"[{market}] 최종 수집: {len(result)}개")
+    return result
 
 def get_ohlc_history(ticker: str, start: str, end: str) -> pd.DataFrame:
-    """일봉 OHLC 조회"""
+    """pykrx로 일봉 OHLC 조회"""
     try:
         df = stock.get_market_ohlcv_by_date(start, end, ticker)
         if df is None or df.empty:
             return pd.DataFrame()
-        # 컬럼 확인
-        needed = ["시가", "종가"]
-        if not all(c in df.columns for c in needed):
-            logger.warning(f"[{ticker}] 컬럼 부족: {df.columns.tolist()}")
+        if not all(c in df.columns for c in ["시가", "종가"]):
             return pd.DataFrame()
         return df
     except Exception as e:
@@ -71,11 +104,9 @@ def get_ohlc_history(ticker: str, start: str, end: str) -> pd.DataFrame:
 def calc_bb(series: pd.Series, period: int, multiplier: float):
     mid = series.rolling(window=period).mean()
     std = series.rolling(window=period).std(ddof=0)
-    upper = mid + multiplier * std
-    lower = mid - multiplier * std
-    return float(upper.iloc[-1]), float(mid.iloc[-1]), float(lower.iloc[-1])
+    return float((mid + multiplier*std).iloc[-1]), float(mid.iloc[-1]), float((mid - multiplier*std).iloc[-1])
 
-def is_near(price: float, target: float, proximity_pct: float) -> bool:
+def is_near(price, target, proximity_pct):
     if not target or np.isnan(target) or target == 0:
         return False
     return abs(price - target) / abs(target) * 100 <= proximity_pct
@@ -116,10 +147,10 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
         "summary": {"total_analyzed": 0, "bb1_matched": 0, "bb2_matched": 0, "overlap_lower_count": 0, "overlap_mid_count": 0}
     }
 
+    # 네이버에서 거래대금 상위 100종목 수집
     all_tickers = []
     for market_name in ["KOSPI", "KOSDAQ"]:
-        tickers = get_top100_by_amount(market_name, date_str)
-        logger.info(f"[{market_name}] 수집: {len(tickers)}개")
+        tickers = get_top100_naver(market_name, date_str)
         all_tickers.extend(tickers)
         time.sleep(0.5)
 
@@ -144,7 +175,7 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
                 _, bb1_mid, bb1_lower = calc_bb(open_series, 4, 4.0)
                 bb1_conds = classify_conditions(close_today, bb1_lower, bb1_mid, proximity)
                 si = {"name": name, "code": ticker, "market": market, "price": close_today,
-                      "amount": amount_str, "bb_lower": round(bb1_lower, 0), "bb_mid": round(bb1_mid, 0)}
+                      "amount": amount_str, "bb_lower": round(bb1_lower,0), "bb_mid": round(bb1_mid,0)}
                 m1 = False
                 if "하한 이탈" in bb1_conds:
                     result["bb1"]["below_lower"].append({**si, "condition": "하한 이탈"}); m1=True
@@ -162,7 +193,7 @@ def run_screener(proximity: float = 3.0, date_str_input: str = None):
                 _, bb2_mid, bb2_lower = calc_bb(close_series, 20, 2.0)
                 bb2_conds = classify_conditions(close_today, bb2_lower, bb2_mid, proximity)
                 si2 = {"name": name, "code": ticker, "market": market, "price": close_today,
-                       "amount": amount_str, "bb_lower": round(bb2_lower, 0), "bb_mid": round(bb2_mid, 0)}
+                       "amount": amount_str, "bb_lower": round(bb2_lower,0), "bb_mid": round(bb2_mid,0)}
                 m2 = False
                 if "하한 이탈" in bb2_conds:
                     result["bb2"]["below_lower"].append({**si2, "condition": "하한 이탈"}); m2=True
